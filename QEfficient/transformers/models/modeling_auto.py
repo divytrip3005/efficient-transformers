@@ -29,7 +29,7 @@ from transformers import (
 
 import QEfficient
 from QEfficient.base.modeling_qeff import QEFFBaseModel
-from QEfficient.base.onnx_transforms import FP16ClipTransform, SplitTensorsTransform
+from QEfficient.base.onnx_transforms import FP16ClipTransform
 from QEfficient.base.pytorch_transforms import SplitGateUpWeightsTransform
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.generation.text_generation_inference import (
@@ -245,8 +245,7 @@ class QEFFAutoModel(QEFFTransformersBase):
 
     _hf_auto_class = AutoModel
     _pytorch_transforms = [CustomOpsTransform, AwqToMatmulNbitsTransform, GPTQToMatmulNbitsTransform]
-    # FP16Clip inlines external weights; without Split the saved protobuf exceeds 2GB for large embedders.
-    _onnx_transforms = [FP16ClipTransform, SplitTensorsTransform]
+    _onnx_transforms = [FP16ClipTransform]
 
     def __init__(self, model: nn.Module, pooling=None, **kwargs):
         """
@@ -2992,7 +2991,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         self.hash_params["prefill_only"] = True
         if enable_chunking:
             self.hash_params["chunking"] = True
-            return constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
+            self.hash_params["EXPERT_BLOCKING_NUM_NSP"] = os.environ.get("EXPERT_BLOCKING_NUM_NSP", None)
+            self.hash_params["EXPERT_BLOCKING_PACKED_CHUNK_SIZE"] = os.environ.get("EXPERT_BLOCKING_PACKED_CHUNK_SIZE", None)
+            # return constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
+            return (
+                prefill_seq_len
+                if prefill_seq_len is not None and prefill_seq_len > constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
+                else constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
+            )
 
         num_q_blocks = (
             self.hash_params["blocking_config"].num_q_blocks if self.hash_params.get("blocking_kwargs", None) else None
@@ -3027,6 +3033,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         self.hash_params["NUM_Q_BLOCKS"] = num_q_blocks
         self.hash_params["NUM_FFN_BLOCKS"] = num_ffn_blocks
         self.hash_params["ENABLE_OPT_SWA"] = os.environ.get("ENABLE_OPT_SWA", "0")
+        self.hash_params["EXPERT_BLOCKING_NUM_NSP"] = os.environ.get("EXPERT_BLOCKING_NUM_NSP", None)
+        self.hash_params["EXPERT_BLOCKING_PACKED_CHUNK_SIZE"] = os.environ.get("EXPERT_BLOCKING_PACKED_CHUNK_SIZE", None)
         return (
             min_seq_len
             if min_seq_len > constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
@@ -3092,7 +3100,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                     )
                     kv_cache_shape[2] = (
                         seq_len
-                        + (self.model.config.sliding_window if self.model.config.sliding_window is not None else 0)
+                        + (getattr(self.model.config, "sliding_window", None) or 0)
                         if enable_chunking
                         else seq_len
                     )
@@ -3103,9 +3111,11 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 self.hash_params.pop("NUM_FFN_BLOCKS", None)
                 self.hash_params.pop("ENABLE_OPT_SWA", None)
                 self.hash_params.pop("chunking", None)
+                self.hash_params.pop("EXPERT_BLOCKING_NUM_NSP", None)
+                self.hash_params.pop("EXPERT_BLOCKING_PACKED_CHUNK_SIZE", None)
                 if kwargs.get("retain_full_kv", False):
                     kv_cache_shape[2] = seq_len + (
-                        self.model.config.sliding_window if self.model.config.sliding_window is not None else 0
+                        getattr(self.model.config, "sliding_window", None) or 0
                     )
                     self.hash_params["retain_full_kv"] = True
 
