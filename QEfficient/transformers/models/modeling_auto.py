@@ -2993,12 +2993,20 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             self.hash_params["chunking"] = True
             self.hash_params["EXPERT_BLOCKING_NUM_NSP"] = os.environ.get("EXPERT_BLOCKING_NUM_NSP", None)
             self.hash_params["EXPERT_BLOCKING_PACKED_CHUNK_SIZE"] = os.environ.get("EXPERT_BLOCKING_PACKED_CHUNK_SIZE", None)
-            # return constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
-            return (
-                prefill_seq_len
-                if prefill_seq_len is not None and prefill_seq_len > constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
-                else constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
-            )
+            # Compute num_expert_chunks and set on each MoE module so the packed
+            # chunk loop unrolls the correct number of times during ONNX export
+            # even when tracing with the small default seq_len (32).
+            if prefill_seq_len is not None:
+                pcs = int(os.environ.get("EXPERT_BLOCKING_PACKED_CHUNK_SIZE", 256))
+                num_expert_chunks = max(1, prefill_seq_len // pcs)
+                self.hash_params["num_expert_chunks"] = num_expert_chunks
+                # Set directly on each MoE module so it never travels via **kwargs
+                if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
+                    for layer in self.model.model.layers:
+                        moe = getattr(layer, "block_sparse_moe", None) or getattr(layer, "mlp", None)
+                        if moe is not None:
+                            setattr(moe, "_num_expert_chunks", num_expert_chunks)
+            return constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
 
         num_q_blocks = (
             self.hash_params["blocking_config"].num_q_blocks if self.hash_params.get("blocking_kwargs", None) else None
